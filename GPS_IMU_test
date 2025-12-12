@@ -1,0 +1,1406 @@
+#include <ESP32Encoder.h>
+#include <ESP32Servo.h>
+#include <WiFi.h>
+#include <ESPmDNS.h>
+#include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h>
+#include <Wire.h>
+#include <HardwareSerial.h>
+#include <math.h>
+#include <Arduino.h>
+
+/* =========================
+   ========== MPU6050 ==========
+   ========================= */
+const int MPU_ADDR = 0x68;
+float accelX = 0.0f;
+float accelY = 0.0f;
+float accelZ = 0.0f;
+
+float accelX_offset = 0.0f;
+float accelY_offset = 0.0f;
+
+void initMPU6050() {
+  Wire.begin();
+  Wire.beginTransmission(MPU_ADDR);
+  Wire.write(0x6B);
+  Wire.write(0);
+  Wire.endTransmission(true);
+  
+  Wire.beginTransmission(MPU_ADDR);
+  Wire.write(0x1C);
+  Wire.write(0x08);
+  Wire.endTransmission(true);
+  
+  Serial.println("[MPU] MPU6050 initialized");
+  
+  delay(100);
+  float sumX = 0, sumY = 0;
+  for(int i = 0; i < 100; i++) {
+    readMPU6050();
+    sumX += accelX;
+    sumY += accelY;
+    delay(10);
+  }
+  accelX_offset = sumX / 100.0f;
+  accelY_offset = sumY / 100.0f;
+  Serial.print("[MPU] Offsets: X=");
+  Serial.print(accelX_offset);
+  Serial.print(" Y=");
+  Serial.println(accelY_offset);
+}
+
+void readMPU6050() {
+  Wire.beginTransmission(MPU_ADDR);
+  Wire.write(0x3B);
+  Wire.endTransmission(false);
+  Wire.requestFrom(MPU_ADDR, 6, true);
+  
+  int16_t rawX = Wire.read() << 8 | Wire.read();
+  int16_t rawY = Wire.read() << 8 | Wire.read();
+  int16_t rawZ = Wire.read() << 8 | Wire.read();
+  
+  accelX = (rawX / 8192.0f) - accelX_offset;
+  accelY = (rawY / 8192.0f) - accelY_offset;
+  accelZ = (rawZ / 8192.0f);
+}
+
+
+
+AsyncWebServer server(80);
+
+const char* INDEX_HTML PROGMEM = R"HTML(
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ESP32 Car</title>
+<style>
+:root {
+  --gap: 14px;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  font-family: system-ui, Arial;
+  margin: 20px;
+}
+h1 {
+  margin: 0 0 14px;
+  text-align: center;
+}
+#layout {
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  gap: var(--gap);
+  max-width: 900px;
+  margin: 0 auto;
+}
+.col {
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  gap: var(--gap);
+}
+.ctrl-col {
+  width: 80px;
+}
+
+.pad-btn {
+  width: 80px;
+  height: 80px;
+  border: 0;
+  border-radius: 14px;
+  cursor: pointer;
+  box-shadow: 0 2px 6px rgba(0,0,0,.15);
+  user-select: none;
+  touch-action: none;
+  position: relative;
+  background: #fff;
+}
+
+.pad-btn::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+}
+
+.pad-up::before {
+  width: 0;
+  height: 0;
+  border-left: 18px solid transparent;
+  border-right: 18px solid transparent;
+  border-bottom: 26px solid #333;
+}
+
+.pad-down::before {
+  width: 0;
+  height: 0;
+  border-left: 18px solid transparent;
+  border-right: 18px solid transparent;
+  border-top: 26px solid #333;
+}
+
+.pad-left::before {
+  width: 0;
+  height: 0;
+  border-top: 18px solid transparent;
+  border-bottom: 18px solid transparent;
+  border-right: 26px solid #333;
+}
+
+.pad-right::before {
+  width: 0;
+  height: 0;
+  border-top: 18px solid transparent;
+  border-bottom: 18px solid transparent;
+  border-left: 26px solid #333;
+}
+
+.pad-btn:active {
+  transform: translateY(1px);
+}
+.pad-btn[disabled]{
+  opacity:.45;
+  cursor:not-allowed;
+}
+
+#map-wrap {
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+}
+#map {
+  width: min(520px, 86vw);
+  height: 340px;
+  display:block;
+  border-radius:12px;
+  box-shadow: 0 2px 6px rgba(0,0,0,.15);
+  background:#1a1a1a;
+}
+.muted {
+  color:#666;
+  font-size:12px;
+  margin-top:6px;
+  text-align:center;
+}
+.row {
+  margin: 16px auto 0;
+  max-width: 900px;
+  text-align:center;
+}
+#enc {
+  margin-top: 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+input[type=range]{
+  width: 260px;
+}
+
+.modebar{
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  gap:8px;
+  margin:8px 0 14px;
+  flex-wrap:wrap;
+}
+.mode-btn{
+  border:0;
+  border-radius:999px;
+  padding:6px 12px;
+  font-size:14px;
+  cursor:pointer;
+  box-shadow:0 1px 4px rgba(0,0,0,.15);
+  background:#eee;
+  user-select:none;
+}
+.mode-btn.active{
+  background:#1e88e5;
+  color:#fff;
+}
+
+.start-btn{
+  border:0;
+  border-radius:8px;
+  padding:10px 20px;
+  font-size:16px;
+  font-weight:bold;
+  cursor:pointer;
+  box-shadow:0 2px 6px rgba(0,0,0,.2);
+  background:#4caf50;
+  color:#fff;
+  margin-left:12px;
+  user-select:none;
+}
+.start-btn:disabled{
+  background:#ccc;
+  cursor:not-allowed;
+}
+.start-btn:active:not(:disabled){
+  transform:translateY(1px);
+}
+
+#gpsPanel {
+  font-size:13px;
+  margin-top:8px;
+}
+
+#statusInfo {
+  font-size:14px;
+  margin-top:10px;
+  padding:8px;
+  border-radius:6px;
+  background:#f5f5f5;
+  max-width:520px;
+}
+
+#mpuPanel {
+  font-size:13px;
+  margin-top:8px;
+  padding:8px;
+  border-radius:6px;
+  background:#e3f2fd;
+  max-width:520px;
+}
+</style>
+</head>
+<body>
+<h1>ESP32 Car - Segment Control</h1>
+
+<div class="modebar">
+  <button class="mode-btn" data-mode="0" id="btnMode0">Manual</button>
+  <button class="mode-btn" data-mode="1" id="btnMode1">Automatic (WP)</button>
+  <button class="mode-btn" data-mode="2" id="btnMode2">Test: L/R</button>
+  <button class="start-btn" id="btnStartRoute">Start Route</button>
+  <span id="modeLbl" class="muted"></span>
+</div>
+
+<div id="layout">
+  <div class="col ctrl-col">
+    <button class="pad-btn pad-up" data-kind="drive" data-cmd="f" aria-label="Forward"></button>
+    <button class="pad-btn pad-down" data-kind="drive" data-cmd="b" aria-label="Backward"></button>
+  </div>
+
+  <div id="map-wrap" class="col">
+    <canvas id="map"></canvas>
+
+    <div id="gpsPanel" class="muted">
+      <div>Satellites: <span id="gpsSats">0</span> • HDOP: <span id="gpsHdop">—</span></div>
+      <div>Lat: <span id="gpsLat">—</span> • Lon: <span id="gpsLon">—</span></div>
+    </div>
+
+    <div id="mpuPanel" class="muted">
+      <div><strong>MPU6050:</strong> AccX: <span id="mpuX">—</span>g • AccY: <span id="mpuY">—</span>g</div>
+      <div>Correction: <span id="mpuCorr">—</span> | Segment: <span id="segmentInfo">—</span></div>
+    </div>
+
+    <div id="statusInfo" class="muted">
+      <div>Current WP: <span id="wpCurrent">—</span> / 5</div>
+      <div>Status: <span id="routeState">Stopped</span></div>
+      <div>Encoders: <span id="wpEnc">—</span></div>
+    </div>
+
+    <div class="muted">
+      GPS trajectory of the vehicle
+    </div>
+  </div>
+
+  <div class="col ctrl-col">
+    <button class="pad-btn pad-left" data-kind="steer" data-cmd="l" aria-label="Left"></button>
+    <button class="pad-btn pad-right" data-kind="steer" data-cmd="r" aria-label="Right"></button>
+  </div>
+</div>
+
+<div class="row">
+  <label>Speed: <span id="spv">200</span></label><br/>
+  <input id="spd" type="range" min="0" max="255" value="200"
+         oninput="spv.textContent=this.value"
+         onchange="setSpeed(this.value)">
+  <pre id="enc">EncA: 0 EncB: 0</pre>
+</div>
+
+<script>
+async function cmd(c){
+  try{ await fetch('/cmd?c='+encodeURIComponent(c)); }catch(e){}
+}
+async function setSpeed(v){
+  try{ await fetch('/speed?val='+encodeURIComponent(v)); }catch(e){}
+}
+async function getPos(){
+  try{
+    const r = await fetch('/pos');
+    if(!r.ok) return null;
+    return await r.json();
+  }catch(e){ return null; }
+}
+async function setMode(m){
+  try{
+    await fetch('/mode?m='+encodeURIComponent(m));
+  }catch(e){}
+}
+async function startRoute(){
+  try{
+    await fetch('/start_route');
+    gpsPath = [];
+  }catch(e){}
+}
+async function getState(){
+  try{
+    const r = await fetch('/state');
+    if(!r.ok) return null;
+    return await r.json();
+  }catch(e){ return null; }
+}
+
+let driveState = null, steerState = null;
+
+function applyPress(kind, action){
+  if(kind === 'drive'){
+    if(driveState !== action){
+      driveState = action;
+      cmd(action);
+    }
+  } else {
+    if(steerState !== action){
+      steerState = action;
+      cmd(action);
+    }
+  }
+}
+function applyRelease(kind){
+  if(kind === 'drive' && driveState){
+    driveState=null;
+    cmd('s');
+  }
+  if(kind === 'steer' && steerState){
+    steerState=null;
+    cmd('g');
+  }
+}
+function wireButton(btn){
+  const kind = btn.getAttribute('data-kind');
+  const action = btn.getAttribute('data-cmd');
+  const down = (ev)=>{
+    ev.preventDefault();
+    btn.setPointerCapture?.(ev.pointerId);
+    applyPress(kind, action);
+  };
+  const up = (ev)=>{
+    ev.preventDefault();
+    applyRelease(kind);
+  };
+  btn.addEventListener('pointerdown', down);
+  btn.addEventListener('pointerup', up);
+  btn.addEventListener('pointercancel', up);
+  btn.addEventListener('pointerleave', (ev)=>{
+    if(ev.pressure===0) applyRelease(kind);
+  });
+}
+
+const ctrlBtns = Array.from(document.querySelectorAll('.pad-btn'));
+ctrlBtns.forEach(wireButton);
+
+const modeBtns = Array.from(document.querySelectorAll('.mode-btn'));
+const btnStartRoute = document.getElementById('btnStartRoute');
+
+function applyModeToUI(m){
+  modeBtns.forEach(btn=>{
+    const v = parseInt(btn.getAttribute('data-mode'));
+    btn.classList.toggle('active', v === m);
+  });
+
+  ctrlBtns.forEach(b => b.disabled = (m !== 0));
+
+  btnStartRoute.style.display = (m === 1) ? 'inline-block' : 'none';
+
+  const modeLbl = document.getElementById('modeLbl');
+  if(m === 0) modeLbl.textContent = "Manual active";
+  else if(m === 1) modeLbl.textContent = "Automatic (Waypoints + MPU)";
+  else if(m === 2) modeLbl.textContent = "Test: first left, then right";
+  else modeLbl.textContent = "";
+}
+
+modeBtns.forEach(btn=>{
+  btn.addEventListener('click', ()=>{
+    const m = parseInt(btn.getAttribute('data-mode'));
+    setMode(m);
+  });
+});
+
+btnStartRoute.addEventListener('click', ()=>{
+  startRoute();
+});
+
+window.addEventListener('blur', ()=>{
+  if(driveState){
+    cmd('s');
+    driveState=null;
+  }
+  if(steerState){
+    cmd('g');
+    steerState=null;
+  }
+});
+
+const downKeys = new Set();
+addEventListener('keydown', (e)=>{
+  if(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.key)){
+    e.preventDefault();
+    if(downKeys.has(e.key)) return;
+    downKeys.add(e.key);
+    if(e.key==='ArrowUp') applyPress('drive','f');
+    if(e.key==='ArrowDown') applyPress('drive','b');
+    if(e.key==='ArrowLeft') applyPress('steer','l');
+    if(e.key==='ArrowRight')applyPress('steer','r');
+  }
+});
+addEventListener('keyup', (e)=>{
+  if(downKeys.has(e.key)){
+    downKeys.delete(e.key);
+    if(e.key==='ArrowUp' || e.key==='ArrowDown') applyRelease('drive');
+    if(e.key==='ArrowLeft' || e.key==='ArrowRight') applyRelease('steer');
+  }
+});
+
+async function tickEnc(){
+  try{
+    const r = await fetch('/enc');
+    const t = await r.text();
+    document.getElementById('enc').textContent = t;
+  }catch(e){}
+  setTimeout(tickEnc, 200);
+}
+tickEnc();
+
+async function tickState(){
+  const s = await getState();
+  if(s){
+    let m = (typeof s.mode === 'number') ? s.mode : (s.auto ? 1 : 0);
+    applyModeToUI(m);
+
+    const spd = document.getElementById('spd');
+    if(typeof s.speed === 'number' && +spd.value !== s.speed){
+      spd.value = s.speed;
+      document.getElementById('spv').textContent = s.speed;
+    }
+
+    const satsEl = document.getElementById('gpsSats');
+    const hdopEl = document.getElementById('gpsHdop');
+    const latEl = document.getElementById('gpsLat');
+    const lonEl = document.getElementById('gpsLon');
+
+    satsEl.textContent = (typeof s.sats === 'number') ? s.sats : 0;
+    hdopEl.textContent = (typeof s.hdop === 'number') ? s.hdop.toFixed(1) : "—";
+    latEl.textContent = (typeof s.lat === 'number') ? s.lat.toFixed(6) : "—";
+    lonEl.textContent = (typeof s.lon === 'number') ? s.lon.toFixed(6) : "—";
+
+    document.getElementById('wpCurrent').textContent = (typeof s.wp === 'number') ? s.wp + 1 : "—";
+    
+    let stateText = "Stopped";
+    if(s.routeActive) {
+      if(s.waiting) stateText = "Waiting at WP";
+      else stateText = "En route";
+    }
+    document.getElementById('routeState').textContent = stateText;
+    
+    document.getElementById('wpEnc').textContent = (typeof s.encTarget === 'number') ? 
+      s.encCount + " / " + s.encTarget : "—";
+
+    document.getElementById('mpuX').textContent = (typeof s.accelX === 'number') ? s.accelX.toFixed(3) : "—";
+    document.getElementById('mpuY').textContent = (typeof s.accelY === 'number') ? s.accelY.toFixed(3) : "—";
+    
+    let corrText = "Straight";
+    if(s.steerCorr === 1) corrText = "→ Right";
+    else if(s.steerCorr === -1) corrText = "← Left";
+    document.getElementById('mpuCorr').textContent = corrText;
+
+    const segNames = ["WP1→WP2", "WP2→WP3", "WP3→WP4", "WP4→WP5", "End"];
+    document.getElementById('segmentInfo').textContent = 
+      (typeof s.wp === 'number' && s.wp < 5) ? segNames[s.wp] : "—";
+
+    if(typeof s.lat === 'number' && typeof s.lon === 'number' && !isNaN(s.lat) && !isNaN(s.lon)){
+      const newPoint = {lat: s.lat, lon: s.lon};
+      if(gpsPath.length === 0 || 
+         Math.abs(gpsPath[gpsPath.length-1].lat - newPoint.lat) > 0.000001 ||
+         Math.abs(gpsPath[gpsPath.length-1].lon - newPoint.lon) > 0.000001){
+        gpsPath.push(newPoint);
+        drawMap();
+      }
+    }
+  }
+  setTimeout(tickState, 400);
+}
+tickState();
+
+const canvas = document.getElementById('map');
+const ctx = canvas.getContext('2d');
+let gpsPath = [];
+
+function resizeCanvas(){
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = Math.round(rect.width * dpr);
+  canvas.height = Math.round(rect.height * dpr);
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  drawMap();
+}
+addEventListener('resize', resizeCanvas);
+resizeCanvas();
+
+function latLonToMeters(lat1, lon1, lat2, lon2){
+  const R = 6371000;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const lat1Rad = lat1 * Math.PI / 180;
+  const lat2Rad = lat2 * Math.PI / 180;
+  
+  const x = dLon * Math.cos((lat1Rad + lat2Rad) / 2) * R;
+  const y = dLat * R;
+  return {x, y};
+}
+
+function drawMap(){
+  const rect = canvas.getBoundingClientRect();
+  const w = rect.width, h = rect.height;
+  
+  ctx.fillStyle = '#1a1a1a';
+  ctx.fillRect(0, 0, w, h);
+  
+  if(gpsPath.length === 0) return;
+  
+  let minLat = gpsPath[0].lat, maxLat = gpsPath[0].lat;
+  let minLon = gpsPath[0].lon, maxLon = gpsPath[0].lon;
+  
+  for(const p of gpsPath){
+    if(p.lat < minLat) minLat = p.lat;
+    if(p.lat > maxLat) maxLat = p.lat;
+    if(p.lon < minLon) minLon = p.lon;
+    if(p.lon > maxLon) maxLon = p.lon;
+  }
+  
+  const centerLat = (minLat + maxLat) / 2;
+  const centerLon = (minLon + maxLon) / 2;
+  
+  const points = gpsPath.map(p => latLonToMeters(centerLat, centerLon, p.lat, p.lon));
+  
+  let minX = points[0].x, maxX = points[0].x;
+  let minY = points[0].y, maxY = points[0].y;
+  for(const p of points){
+    if(p.x < minX) minX = p.x;
+    if(p.x > maxX) maxX = p.x;
+    if(p.y < minY) minY = p.y;
+    if(p.y > maxY) maxY = p.y;
+  }
+  
+  const rangeX = maxX - minX;
+  const rangeY = maxY - minY;
+  const margin = 40;
+  
+  let scale = 1;
+  if(rangeX > 0 && rangeY > 0){
+    scale = Math.min((w - 2*margin) / rangeX, (h - 2*margin) / rangeY);
+  }
+  
+  const offsetX = w/2 - (minX + maxX)/2 * scale;
+  const offsetY = h/2 + (minY + maxY)/2 * scale;
+  
+  for(let i = 0; i < points.length; i++){
+    const sx = points[i].x * scale + offsetX;
+    const sy = -points[i].y * scale + offsetY;
+    
+    ctx.beginPath();
+    ctx.arc(sx, sy, 4, 0, Math.PI * 2);
+    ctx.fillStyle = i === points.length - 1 ? '#4caf50' : '#2196f3';
+    ctx.fill();
+    
+    if(i > 0){
+      const sx0 = points[i-1].x * scale + offsetX;
+      const sy0 = -points[i-1].y * scale + offsetY;
+      ctx.beginPath();
+      ctx.moveTo(sx0, sy0);
+      ctx.lineTo(sx, sy);
+      ctx.strokeStyle = '#1976d2';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+  }
+}
+</script>
+</body>
+</html>
+)HTML";
+
+
+void connectWiFi(){
+  WiFi.mode(WIFI_AP);
+  const char* ap_ssid = "car";
+  const char* ap_pass = "12345678";
+  bool ok = WiFi.softAP(ap_ssid, ap_pass, 1, 0, 4);
+  if (ok) {
+    IPAddress ip = WiFi.softAPIP();
+    Serial.println("[AP] Access Point active");
+    Serial.print(" SSID: ");
+    Serial.println(ap_ssid);
+    Serial.print(" PASS: ");
+    Serial.println(ap_pass);
+    Serial.print(" IP: ");
+    Serial.println(ip);
+  } else {
+    Serial.println("[AP] Error starting Access Point!");
+  }
+}
+
+
+const int ENCA_1 = 23;
+const int ENCA_2 = 5;
+const int ENCB_1 = 19;
+const int ENCB_2 = 18;
+ESP32Encoder encA, encB;
+
+
+const int motorA_EN = 25;
+const int motorA_IN1 = 26;
+const int motorA_IN2 = 27;
+const int motorB_EN = 33;
+const int motorB_IN1 = 32;
+const int motorB_IN2 = 14;
+const int freqPWM = 20000;
+const int resPWM = 8;
+int valSpeed = 200;
+
+
+const int servoPin1 = 2;
+const int servoPin2 = 4;
+const int servoPin3 = 13;
+
+
+volatile float posX = 0.0f;
+volatile float posY = 0.0f;
+volatile float headingDeg_local = 0.0f;
+
+
+static const int RXPin = 16;
+static const int TXPin = 17;
+static const uint32_t GPSBaud = 9600;
+
+HardwareSerial GPS(2);
+String nmeaSentence = "";
+
+double lat = NAN;
+double lon = NAN;
+int sats = 0;
+double hdop = NAN;
+
+
+volatile int mode = 0;
+
+struct WP { 
+  double lat; 
+  double lon; 
+  int64_t encTarget;
+};
+
+WP waypoints[] = {
+  {25.652445, -100.289974, 0},          // WP1 - Start
+  {25.652384, -100.290007, 89159},      // WP2
+  {25.652368, -100.289941, 178232},     // WP3
+  {25.652433, -100.289925, 271248},     // WP4
+  {25.652454, -100.289974, 362082}      // WP5
+};
+const int NUM_WP = sizeof(waypoints)/sizeof(waypoints[0]);
+
+int target = 0;
+bool routeActive = false;
+bool waiting = false;
+uint32_t waitStartMs = 0;
+const uint32_t WAIT_TIME_MS = 10000;       // Total waiting time at waypoint (stopped)
+const uint32_t TURN_DURATION_MS = 4300;    // Time executing turn + forward after wait
+
+int steerCorrection = 0;
+
+// SERVO LOCK CONTROL
+bool allowServoControl = true;
+const int64_t SERVO_UNLOCK_THRESHOLD = 1500;  
+
+
+
+struct SegmentConfig {
+  bool enableIMU;           // Enable IMU control in this segment
+  float accelX_threshold;   // Lateral acceleration threshold
+  float accelX_deadzone;    // Deadzone
+  float accelY_min;         // Minimum movement
+  int pulse_duration_ms;    // Correction pulse duration
+  int pulse_cooldown_ms;    // Time between pulses
+};
+
+
+SegmentConfig segmentConfigs[4] = {
+  // SEGMENT 0: WP1 → WP2 (Start, straight line)
+  {
+    .enableIMU = true,          // ENABLED to maintain straight line
+    .accelX_threshold = 0.2f,  // Tolerant
+    .accelX_deadzone = 0.03f,   // Wide deadzone
+    .accelY_min = 0.02f,        // Minimum movement
+    .pulse_duration_ms = 150,   // Short pulse
+    .pulse_cooldown_ms = 500    // Wait between corrections
+  },
+  
+  // SEGMENT 1: WP2 → WP3 (First curve)
+  {
+    .enableIMU = true,
+    .accelX_threshold = 0.2f,  
+    .accelX_deadzone = 0.03f,
+    .accelY_min = 0.02f,
+    .pulse_duration_ms = 120,
+    .pulse_cooldown_ms = 400
+  },
+  
+  // SEGMENT 2: WP3 → WP4 (Second curve)
+  {
+    .enableIMU = true,
+    .accelX_threshold = 0.2f,
+    .accelX_deadzone = 0.03f,
+    .accelY_min = 0.02f,
+    .pulse_duration_ms = 120,
+    .pulse_cooldown_ms = 400
+  },
+  
+  // SEGMENT 3: WP4 → WP5 (Last curve)
+  {
+    .enableIMU = true,
+    .accelX_threshold = 0.2f,
+    .accelX_deadzone = 0.03f,
+    .accelY_min = 0.02f,
+    .pulse_duration_ms = 120,
+    .pulse_cooldown_ms = 400
+  }
+};
+
+
+uint32_t lastPulseTime = 0;
+uint32_t pulseStartTime = 0;
+bool pulseActive = false;
+int pulseDirection = 0; 
+
+float accelX_filtered = 0.0f;
+float accelY_filtered = 0.0f;
+const float FILTER_ALPHA = 0.4f;
+
+void updateAccelFilter() {
+  accelX_filtered = FILTER_ALPHA * accelX + (1.0f - FILTER_ALPHA) * accelX_filtered;
+  accelY_filtered = FILTER_ALPHA * accelY + (1.0f - FILTER_ALPHA) * accelY_filtered;
+}
+
+void applyPulseCorrection(int segment) {
+  if (segment < 0 || segment >= 4) return;
+  
+  SegmentConfig &cfg = segmentConfigs[segment];
+  
+  // If IMU disabled in this segment
+  if (!cfg.enableIMU) {
+    steerCorrection = 0;
+    pulseActive = false;
+    return;
+  }
+  
+  // Check minimum movement
+  if (fabs(accelY_filtered) < cfg.accelY_min) {
+    steerCorrection = 0;
+    pulseActive = false;
+    return;
+  }
+  
+  uint32_t now = millis();
+  
+  // If pulse is active
+  if (pulseActive) {
+    if (now - pulseStartTime >= cfg.pulse_duration_ms) {
+      // End pulse
+      pulseActive = false;
+      steerCorrection = 0;
+      lastPulseTime = now;
+    }
+    return;
+  }
+  
+  // Check cooldown
+  if (now - lastPulseTime < cfg.pulse_cooldown_ms) {
+    steerCorrection = 0;
+    return;
+  }
+  
+  // Detect need for correction
+  float absX = fabs(accelX_filtered);
+  
+  if (absX < cfg.accelX_deadzone) {
+    steerCorrection = 0;
+  }
+  else if (absX >= cfg.accelX_threshold) {
+    // START PULSE
+    // AccelX > 0 = car moves to RIGHT → correct to LEFT
+    // AccelX < 0 = car moves to LEFT → correct to RIGHT
+    pulseDirection = (accelX_filtered > 0) ? -1 : 1;
+    steerCorrection = pulseDirection;
+    pulseActive = true;
+    pulseStartTime = now;
+    
+    Serial.print("[PULSE] ");
+    Serial.print(accelX_filtered > 0 ? "Drift RIGHT" : "Drift LEFT");
+    Serial.print(" → Correct ");
+    Serial.println(pulseDirection == -1 ? "LEFT" : "RIGHT");
+  }
+}
+
+/* ======== NAV HELPERS ======== */
+constexpr double EARTH_R = 6371000.0;
+inline double deg2rad(double d){ return d * M_PI / 180.0; }
+inline double rad2deg(double r){ return r * 180.0 / M_PI; }
+
+double haversine_m(double lat1, double lon1, double lat2, double lon2){
+  double p1 = deg2rad(lat1), p2 = deg2rad(lat2);
+  double dlat = p2 - p1;
+  double dlon = deg2rad(lon2 - lon1);
+  double a = sin(dlat/2)*sin(dlat/2) + cos(p1)*cos(p2)*sin(dlon/2)*sin(dlon/2);
+  return 2.0 * EARTH_R * asin(sqrt(a));
+}
+
+double bearing_deg(double lat1, double lon1, double lat2, double lon2){
+  double p1 = deg2rad(lat1), p2 = deg2rad(lat2);
+  double dlon = deg2rad(lon2 - lon1);
+  double y = sin(dlon) * cos(p2);
+  double x = cos(p1)*sin(p2) - sin(p1)*cos(p2)*cos(dlon);
+  double br = atan2(y, x);
+  double deg = fmod((rad2deg(br) + 360.0), 360.0);
+  return deg;
+}
+
+
+void setSpeedClamped(int v){
+  v = constrain(v, 0, 255);
+  ledcWrite(motorA_EN, v);
+  ledcWrite(motorB_EN, v);
+}
+
+void forward() {
+  digitalWrite(motorA_IN1, HIGH);
+  digitalWrite(motorA_IN2, LOW);
+  digitalWrite(motorB_IN1, HIGH);
+  digitalWrite(motorB_IN2, LOW);
+  setSpeedClamped(valSpeed);
+}
+
+void backward() {
+  digitalWrite(motorA_IN1, LOW);
+  digitalWrite(motorA_IN2, HIGH);
+  digitalWrite(motorB_IN1, LOW);
+  digitalWrite(motorB_IN2, HIGH);
+  setSpeedClamped(valSpeed);
+}
+
+void stopMotors() {
+  digitalWrite(motorA_IN1, LOW);
+  digitalWrite(motorA_IN2, LOW);
+  digitalWrite(motorB_IN1, LOW);
+  digitalWrite(motorB_IN2, LOW);
+  setSpeedClamped(0);
+}
+
+void steer_right(){
+  // Check if servo control is locked
+  if (!allowServoControl) {
+    steer_straight();
+    return;
+  }
+  digitalWrite(servoPin1, HIGH);
+  digitalWrite(servoPin2, LOW);
+  digitalWrite(servoPin3, LOW);
+}
+
+void steer_left(){
+  // Check if servo control is locked
+  if (!allowServoControl) {
+    steer_straight();
+    return;
+  }
+  digitalWrite(servoPin1, LOW);
+  digitalWrite(servoPin2, HIGH);
+  digitalWrite(servoPin3, LOW);
+}
+
+void steer_straight(){
+  digitalWrite(servoPin1, LOW);
+  digitalWrite(servoPin2, LOW);
+  digitalWrite(servoPin3, HIGH);
+}
+
+double convertToDecimal(String raw, String dir) {
+  if (raw.length() < 4) return 0.0;
+  double val = raw.toFloat();
+  int deg = int(val / 100);
+  double min = val - (deg * 100);
+  double dec = deg + (min / 60.0);
+  if (dir == "S" || dir == "W") dec = -dec;
+  return dec;
+}
+
+void parseNMEA(const String &sentence) {
+  if (sentence.startsWith("$GPRMC") || sentence.startsWith("$GNRMC")) {
+    String parts[20];
+    int index = 0;
+    for (int i = 0; i < sentence.length(); i++) {
+      if (sentence[i] == ',') {
+        index++;
+        if (index >= 20) break;
+      } else {
+        parts[index] += sentence[i];
+      }
+    }
+
+    if (parts[2] == "A") {
+      lat = convertToDecimal(parts[3], parts[4]);
+      lon = convertToDecimal(parts[5], parts[6]);
+    } 
+    else {
+      lat = NAN;
+      lon = NAN;
+    }
+  }
+
+  if (sentence.startsWith("$GPGGA") || sentence.startsWith("$GNGGA")) {
+    String parts[15];
+    int index = 0;
+    for (int i = 0; i < sentence.length(); i++) {
+      if (sentence[i] == ',') {
+        index++;
+        if (index >= 15) break;
+      } else {
+        parts[index] += sentence[i];
+      }
+    }
+
+    sats = parts[7].toInt();
+
+    if (parts[8].length() > 0) {
+      hdop = parts[8].toFloat();
+    } else {
+      hdop = NAN;
+    }
+  }
+}
+
+
+const int64_t ENC_TOLERANCE = 3000;
+const int64_t ENC_SLOWDOWN = 8000;
+
+void Automatic(){
+  static uint32_t last = 0;
+  if (millis() - last < 50) return;
+  last = millis();
+
+  readMPU6050();
+  updateAccelFilter();
+
+  if (!routeActive) {
+    stopMotors();
+    steer_straight();
+    return;
+  }
+
+  int64_t encAvg = (encA.getCount() + encB.getCount()) / 2;
+
+  //  CHECK IF SERVO SHOULD BE UNLOCKED
+  if (!allowServoControl && encAvg >= SERVO_UNLOCK_THRESHOLD) {
+    allowServoControl = true;
+    Serial.print("[AUTO]  Servo UNLOCKED at ");
+    Serial.print((long long)encAvg);
+    Serial.println(" clicks");
+  }
+
+  if (waiting) {
+    uint32_t waitElapsed = millis() - waitStartMs;
+    
+    if ((waitElapsed < WAIT_TIME_MS) && allowServoControl) {
+      // Phase 1: STOPPED for 10 seconds
+      stopMotors();
+      steer_straight();
+      return;
+    }
+    else if ((waitElapsed < WAIT_TIME_MS + TURN_DURATION_MS)) {
+      // Phase 2: TURN LEFT + FORWARD for 3 seconds (starts at second 11)
+      forward();
+      steer_right();
+      return;
+    }
+    else {
+      // Phase 3: End waiting, continue straight to next waypoint
+      waiting = false;
+      target++;
+      
+      if (target >= NUM_WP) {
+        routeActive = false;
+        stopMotors();
+        steer_straight();
+        Serial.println("[AUTO] Circuit completed!");
+        return;
+      }
+      
+      Serial.print("[AUTO] -> WP");
+      Serial.println(target + 1);
+    }
+  }
+
+  const WP &targetWP = waypoints[target];
+  int64_t distanceToWP = targetWP.encTarget - encAvg;
+
+
+  if (abs(distanceToWP) < ENC_TOLERANCE) {
+    Serial.print("[AUTO] WP");
+    Serial.print(target + 1);
+    Serial.println(" reached");
+    
+    waiting = true;
+    waitStartMs = millis();
+    stopMotors();
+    steer_straight();
+    return;
+  }
+
+  // ===== SPEED CONTROL =====
+  if (abs(distanceToWP) < ENC_SLOWDOWN) {
+    int reducedSpeed = map(abs(distanceToWP), 0, ENC_SLOWDOWN, valSpeed * 0.65, valSpeed);
+    setSpeedClamped(reducedSpeed);
+  } else {
+    setSpeedClamped(valSpeed);
+  }
+
+
+  int currentSegment = target; // 0=WP1→WP2, 1=WP2→WP3, etc.
+  applyPulseCorrection(currentSegment);
+
+  // ===== APPLY DIRECTION TO SERVO =====
+  if (steerCorrection == -1) {
+    steer_left();
+  } else if (steerCorrection == 1) {
+    steer_right();
+  } else {
+    steer_straight();
+  }
+
+  forward();
+
+
+  static bool originSet = false;
+  static double lat0 = 0, lon0 = 0;
+  if (!isnan(lat) && !isnan(lon)) {
+    if (!originSet) { 
+      lat0 = lat; 
+      lon0 = lon; 
+      originSet = true; 
+    }
+    double dy = haversine_m(lat0, lon0, lat, lon0);
+    double dx = haversine_m(lat0, lon0, lat0, lon);
+    if (lat < lat0) dy = -dy;
+    if (lon < lon0) dx = -dx;
+    posX = dx;
+    posY = dy;
+    
+    if (target < NUM_WP) {
+      headingDeg_local = bearing_deg(lat, lon, waypoints[target].lat, waypoints[target].lon);
+    }
+  }
+}
+
+
+int demoPhase = 0;
+uint32_t demoPhaseStart = 0;
+
+void resetDemoMode() {
+  demoPhase = 0;
+  demoPhaseStart = 0;
+}
+
+void demoModeStep() {
+  const uint32_t TURN_TIME = 4300;
+
+  switch (demoPhase) {
+    case 0:
+      forward();
+      steer_left();
+      demoPhaseStart = millis();
+      demoPhase = 1;
+      break;
+
+    case 1: case 2: case 3: case 4:
+      if (millis() - demoPhaseStart >= TURN_TIME) {
+        steer_straight();
+        demoPhaseStart = millis();
+        demoPhase++;
+        if (demoPhase <= 4) {
+          steer_left();
+        } else {
+          steer_right();
+        }
+      }
+      break;
+
+    case 5: case 6: case 7: case 8:
+      if (millis() - demoPhaseStart >= TURN_TIME) {
+        steer_straight();
+        demoPhaseStart = millis();
+        demoPhase++;
+        if (demoPhase <= 8) {
+          steer_right();
+        } else {
+          stopMotors();
+          steer_straight();
+          demoPhase = 0;
+        }
+      }
+      break;
+  }
+}
+
+
+void setup() {
+  Serial.begin(115200);
+
+  initMPU6050();
+
+  ESP32Encoder::useInternalWeakPullResistors = puType::up;
+  encA.attachFullQuad(ENCA_1, ENCA_2);
+  encB.attachFullQuad(ENCB_1, ENCB_2);
+  encA.clearCount();
+  encB.clearCount();
+
+  pinMode(motorA_IN1, OUTPUT);
+  pinMode(motorA_IN2, OUTPUT);
+  pinMode(motorB_IN1, OUTPUT);
+  pinMode(motorB_IN2, OUTPUT);
+  ledcAttach(motorA_EN, freqPWM, resPWM);
+  ledcAttach(motorB_EN, freqPWM, resPWM);
+  ledcWrite(motorA_EN, 0);
+  ledcWrite(motorB_EN, 0);
+
+  pinMode(servoPin1, OUTPUT);
+  pinMode(servoPin2, OUTPUT);
+  pinMode(servoPin3, OUTPUT);
+  steer_straight();
+
+  connectWiFi();
+
+  GPS.begin(GPSBaud, SERIAL_8N1, RXPin, TXPin);
+
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest* req){
+    req->send_P(200, "text/html", INDEX_HTML);
+  });
+
+  server.on("/cmd", HTTP_GET, [](AsyncWebServerRequest* req){
+    if (!req->hasParam("c")) {
+      req->send(400, "text/plain", "Missing c");
+      return;
+    }
+    char c = req->getParam("c")->value().charAt(0);
+
+    if (mode != 0) {
+      req->send(200, "text/plain", "IGNORED (mode!=0)");
+      return;
+    }
+
+    switch(c){
+      case 'f': forward(); break;
+      case 'b': backward(); break;
+      case 's': stopMotors(); break;
+      case 'r': steer_right(); break;
+      case 'l': steer_left(); break;
+      case 'g': steer_straight();break;
+      default: break;
+    }
+    req->send(200, "text/plain", "OK");
+  });
+
+  server.on("/speed", HTTP_GET, [](AsyncWebServerRequest* req){
+    if (!req->hasParam("val")) {
+      req->send(400, "text/plain", "Missing val");
+      return;
+    }
+    int v = req->getParam("val")->value().toInt();
+    v = constrain(v, 0, 255);
+    valSpeed = v;
+    req->send(200, "text/plain", String("speed=") + v);
+  });
+
+  server.on("/enc", HTTP_GET, [](AsyncWebServerRequest* req){
+    int64_t cA = encA.getCount();
+    int64_t cB = encB.getCount();
+    String out = "EncA: " + String((long long)cA) + " EncB: " + String((long long)cB);
+    req->send(200, "text/plain", out);
+  });
+
+  server.on("/pos", HTTP_GET, [](AsyncWebServerRequest* req){
+    String json = String("{\"x\":") + String(posX,3) +
+                  ",\"y\":" + String(posY,3) +
+                  ",\"hdg\":" + String(headingDeg_local,1) + "}";
+    req->send(200, "application/json", json);
+  });
+
+  server.on("/mode", HTTP_GET, [](AsyncWebServerRequest* req){
+    if (req->hasParam("m")) {
+      int m = req->getParam("m")->value().toInt();
+      if (m < 0 || m > 2) m = 0;
+
+      mode = m;
+
+      stopMotors();
+      steer_straight();
+      routeActive = false;
+      waiting = false;
+      target = 0;
+
+      if (mode == 2) {
+        resetDemoMode();
+      }
+    }
+
+    String json = String("{\"mode\":") + String(mode) +
+                  ",\"auto\":" + (mode == 1 ? "true" : "false") + "}";
+    req->send(200, "application/json", json);
+  });
+
+  server.on("/start_route", HTTP_GET, [](AsyncWebServerRequest* req){
+    if (mode == 1) {
+      target = 0;
+      routeActive = true;
+      waiting = false;
+      encA.clearCount();
+      encB.clearCount();
+      pulseActive = false;
+      steerCorrection = 0;
+      
+      //  LOCK SERVO AT START
+      allowServoControl = false;
+      
+      Serial.println("[AUTO] ▶ Starting route...");
+      Serial.print("[AUTO]  Servo LOCKED until ");
+      Serial.print((long long)SERVO_UNLOCK_THRESHOLD);
+      Serial.println(" encoder clicks");
+      
+      req->send(200, "text/plain", "Route started - Servo locked");
+    } else {
+      req->send(400, "text/plain", "Not in automatic mode");
+    }
+  });
+
+  server.on("/state", HTTP_GET, [](AsyncWebServerRequest* req){
+    bool locValid = !isnan(lat) && !isnan(lon);
+    bool hdopValid = !isnan(hdop);
+
+    String latStr  = locValid   ? String(lat,  6) : "null";
+    String lonStr  = locValid   ? String(lon,  6) : "null";
+    String hdopStr = hdopValid  ? String(hdop, 1) : "null";
+
+    int64_t encAvg = (encA.getCount() + encB.getCount()) / 2;
+    int64_t encTarget = (target < NUM_WP) ? waypoints[target].encTarget : 0;
+
+    String json = String("{\"mode\":") + String(mode) +
+                  ",\"auto\":" + (mode == 1 ? "true" : "false") +
+                  ",\"speed\":" + String(valSpeed) +
+                  ",\"sats\":" + String(sats) +
+                  ",\"hdop\":" + hdopStr +
+                  ",\"lat\":" + latStr +
+                  ",\"lon\":" + lonStr +
+                  ",\"wp\":" + String(target) +
+                  ",\"routeActive\":" + (routeActive ? "true" : "false") +
+                  ",\"waiting\":" + (waiting ? "true" : "false") +
+                  ",\"encCount\":" + String((long long)encAvg) +
+                  ",\"encTarget\":" + String((long long)encTarget) +
+                  ",\"accelX\":" + String(accelX_filtered, 3) +
+                  ",\"accelY\":" + String(accelY_filtered, 3) +
+                  ",\"steerCorr\":" + String(steerCorrection) + "}";
+    req->send(200, "application/json", json);
+  });
+
+  server.begin();
+  Serial.println("Webserver started at http://192.168.4.1");
+}
+
+/* ============ LOOP ============ */
+void loop() {
+  // GPS
+  while (GPS.available() > 0) {
+    char c = GPS.read();
+    if (c == '\n') {
+      if (nmeaSentence.length() > 6) {
+        parseNMEA(nmeaSentence);
+      }
+      nmeaSentence = "";
+    } else if (c != '\r') {
+      nmeaSentence += c;
+    }
+  }
+
+  // Read MPU continuously
+  static uint32_t mpuLast = 0;
+  if (millis() - mpuLast > 50) {
+    mpuLast = millis();
+    readMPU6050();
+    updateAccelFilter();
+  }
+
+  // Enhanced debug
+  static uint32_t t0 = 0;
+  if (millis() - t0 > 400) {
+    t0 = millis();
+    int64_t avg = (encA.getCount() + encB.getCount()) / 2;
+    
+    Serial.print("Enc:");
+    Serial.print((long long)avg);
+    Serial.print(" | IMU: X=");
+    Serial.print(accelX_filtered, 3);
+    Serial.print(" Y=");
+    Serial.print(accelY_filtered, 3);
+    
+    if(mode == 1 && routeActive) {
+      Serial.print(" | Seg:");
+      Serial.print(target);
+      Serial.print(" (");
+      if(target == 0) Serial.print("WP1→2");
+      else if(target == 1) Serial.print("WP2→3");
+      else if(target == 2) Serial.print("WP3→4");
+      else if(target == 3) Serial.print("WP4→5");
+      Serial.print(") | Corr:");
+      if(steerCorrection == -1) Serial.print("LEFT");
+      else if(steerCorrection == 1) Serial.print("RIGHT");
+      else Serial.print("STR");
+      if(pulseActive) Serial.print(" [PULSE]");
+      if(waiting) Serial.print(" [WAIT]");
+      if(!allowServoControl) Serial.print(" [LOCKED]");
+    }
+    Serial.println();
+  }
+
+  // Serial control
+  if (mode == 0 && Serial.available() > 0) {
+    char input = Serial.read();
+    if      (input == 'r') { steer_right(); }
+    else if (input == 'l') { steer_left(); }
+    else if (input == 'g') { steer_straight();}
+    else if (input == 'f') { forward(); }
+    else if (input == 'b') { backward(); }
+    else if (input == 's') { stopMotors(); }
+  }
+
+  if (mode == 1) {
+    Automatic();
+  }
+  else if (mode == 2) {
+    demoModeStep();
+  }
+
+  delay(20);
+}
